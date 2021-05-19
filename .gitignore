@@ -1,3 +1,7 @@
 OCR(Testing Purposes Only)
 OCR
 __pycache__
+.env
+*.mp4
+/Telegram Bot/.env
+.env

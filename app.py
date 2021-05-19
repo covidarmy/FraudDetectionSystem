@@ -5,7 +5,7 @@ Created on Sun May  2 17:02:21 2021
 @author: vishn
 """
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, json, jsonify, render_template, request
 from pymongo import MongoClient
 import re
 import string
@@ -18,7 +18,9 @@ import io
 import threading
 from flask_cors import CORS
 from datetime import datetime
-
+from dotenv import load_dotenv
+import os
+load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
@@ -37,8 +39,8 @@ def getNum(listRaw):
                 listOfNumbers.append(ele)
     curatedNumbers = []
     for number in listOfNumbers:
-        number = "".join(e for e in number if e.isalnum())
-        #print("Number: ", number)
+        number = "".join(e for e in number if e.isnumeric())
+        # print("Number: ", number)
         if(len(number) > 10):
             curatedNumbers.append(number[-10:])
         else:
@@ -49,11 +51,11 @@ def getNum(listRaw):
 def getMeNum(listRaw):
     if(len(listRaw) == 0):
         return listRaw
-    #listOfNumbers = list(filter(None, list(itertools.chain(*listRaw))))
+    # listOfNumbers = list(filter(None, list(itertools.chain(*listRaw))))
     curatedNumbers = []
     for number in listRaw:
-        number = "".join(e for e in number if e.isalnum())
-        #print("Number: ", number)
+        number = "".join(e for e in number if e.isnumeric())
+        # print("Number: ", number)
         if(len(number) > 10):
             curatedNumbers.append(number[-10:])
         else:
@@ -90,7 +92,7 @@ def cleanText(text):
     return ' '.join(words)
 
 # te=cleanText(cleanLinks(cleanEmoji("b\"RT @GuptaJay3762: #EmmanuelMacron  Turkey's President Tayyip Erdogan Calls For Boycott French Product But His Wife Poses With Hermes Paris")))
-#print(list(set((getNum(re.findall(exp, te))+getNum(re.findall(exp, te.replace(" ","@")))))))
+# print(list(set((getNum(re.findall(exp, te))+getNum(re.findall(exp, te.replace(" ","@")))))))
 
 
 def findNumbersInText(tweetText):
@@ -135,7 +137,7 @@ def findFrauds(resource, since, api):
     allFraudNumbers = []
     latestFetchedId = ""
     for tweet in tweepy.Cursor(api.search, q="{} (fraud OR scam)".format(resource), lang="en", result_type='recent', tweet_mode='extended', since_id=since).items():
-        #print("\n\nIn For!!")
+        # print("\n\nIn For!!")
         fraudNumbersInThisTweet, latestFetchedId = findFraudInThisTweet(
             tweet, latestFetchedId)
         allFraudNumbers += fraudNumbersInThisTweet
@@ -144,19 +146,15 @@ def findFrauds(resource, since, api):
 
 def createMongoConnection():
     # MongoDB
-    client = MongoClient(
-        "Client URL")
+    client = MongoClient(os.getenv("MONGO_URI_FRAUD"))
     db = client.get_database('Suspicious_Listings')
     col = db.Listings
     return client, col
 
 
 def createMongoConnectionCovidArmy():
-    client = MongoClient(
-        "Client URL")
-    db = client.get_database('test-db-2')
-    col = db.Fraud
-    return client, col
+    client = MongoClient(os.getenv("MONGO_URI_COVID_ARMY"))
+    return client
 
 
 @app.route('/', methods=['GET'])
@@ -164,45 +162,37 @@ def homePage():
     return render_template("index.html")
 
 
-@app.route('/find/<resource>/<numberArray>', methods=['GET'])
-def search(resource, numberArray):
+@app.route('/find/<numberArray>', methods=['GET'])
+def search(numberArray):
     numArray = numberArray.split(',')
     cleanedNumbers = getMeNum(numArray)
     # MongoDB
-    client, col = createMongoConnection()
-    res = col.find_one({"Resource": resource, "Numbers": {
-        "$exists": True, "$in": cleanedNumbers}})
-
-    res2 = col.find_one({"Resource": "Unspecified", "Numbers": {
-        "$exists": True, "$in": cleanedNumbers}})
-
+    client = createMongoConnectionCovidArmy()
+    db = db = client.get_database('red-db')
+    col = db.Fraud
+    res = col.find({"phone_no": {"$in": cleanedNumbers, "$exists": True}})
     client.close()  # Close Connection!
-    if res == None and res2 == None:
+    allPresentNumbers = list(set([i['phone_no'] for i in res]))
+    if len(allPresentNumbers) == 0:
         return jsonify(
             Result=False,
             Status=404
         )
     else:
-        finalValues = []
-        if(res != None):
-            finalValues += list(set(res['Numbers']) & set(cleanedNumbers))
-        if(res2 != None):
-            finalValues += list(set(res2['Numbers']) & set(cleanedNumbers))
-        finalValues = list(set(finalValues))
         return jsonify(
             Result=True,
             Status=200,
-            Values=finalValues
+            Values=allPresentNumbers
         )
 
 
 @app.route('/updateDatabase', methods=['GET'])
 def updateDatabase():
     # Twitter
-    consumer_key = 'XX'
-    consumer_key_secret = 'XX'
-    access_token = 'XX'
-    access_token_secret = 'XX'
+    consumer_key = os.getenv("consumer_key")
+    consumer_key_secret = os.getenv("consumer_key_secret")
+    access_token = os.getenv("access_token")
+    access_token_secret = os.getenv("access_token_secret")
     auth = tweepy.OAuthHandler(consumer_key, consumer_key_secret)
     auth.set_access_token(access_token, access_token_secret)
     api = tweepy.API(auth, wait_on_rate_limit=True)
@@ -224,26 +214,30 @@ def updateDatabase():
 
     def threadThis():
         fraudAcrossAllResources = []
-        #print("Starting the thread!!")
+        # print("Starting the thread!!")
         # Iterate over and send each resource to capture its frauds
-        clientCovid, colCovid = createMongoConnectionCovidArmy()
+        clientCovid = createMongoConnectionCovidArmy()
+        dbCovid = clientCovid.get_database("red-db")
+        colCovid = dbCovid.Fraud
+        dbCovid2 = clientCovid.get_database("staging-db")
+        colCovid2 = dbCovid2.Fraud
         for resource, sinceID in sinceIds.items():
-            #print("\nCurrently Working On: {} Resource\n".format(resource))
+            # print("\nCurrently Working On: {} Resource\n".format(resource))
             allFraudNumbers, updatedId = findFrauds(
                 resource.lower(), sinceID, api)
             fraudAcrossAllResources += allFraudNumbers
             # Update the ID
-            #print("Completed Working\nAll Frauds: {}\n".format(allFraudNumbers))
+            # print("Completed Working\nAll Frauds: {}\n".format(allFraudNumbers))
 
             updatedSinceIds[resource] = updatedId
-            #print("\nUpdated Since IDs: {}\n".format(updatedSinceIds))
+            # print("\nUpdated Since IDs: {}\n".format(updatedSinceIds))
             createRecord = {
                 'Numbers': allFraudNumbers
             }
             updateQuery = {"$addToSet": {
                 "Numbers": {"$each": createRecord['Numbers']}}}
             col.update_one({"Resource": resource}, updateQuery)
-            #print("Updated Resource: {}".format(resource))
+            # print("Updated Resource: {}".format(resource))
 
         for res, tim in sinceIds.items():
             updatedSinceIds[res] = max(updatedSinceIds[res], tim)
@@ -262,8 +256,9 @@ def updateDatabase():
 
         for i in createRecordCovid:
             colCovid.update(i, i, upsert=True)
+            colCovid2.update(i, i, upsert=True)
         clientCovid.close()
-        #print("Thread ended!")
+        # print("Thread ended!")
 
     thread = threading.Thread(target=threadThis)
     thread.start()
@@ -278,7 +273,12 @@ def report():
     numberArray = data['Numbers']
     numArray = numberArray.split(',')
     cleanedNumbers = getMeNum(numArray)
-    clientCovid, colCovid = createMongoConnectionCovidArmy()
+    clientCovid = createMongoConnectionCovidArmy()
+    dbCovid = clientCovid.get_database("red-db")
+    colCovid = dbCovid.Fraud
+    dbCovid2 = clientCovid.get_database("staging-db")
+    colCovid2 = dbCovid2.Fraud
+
     addToStash = {
         "StashNumbers": cleanedNumbers
     }
@@ -288,83 +288,54 @@ def report():
     }}
 
     colCovid.update_one({"Title": "Fraud"}, addToStashQuery)
+
     # clientCovid.close()
 
-    def writeToFraud():
-        stashArrayCursor = colCovid.find({"Title": "Fraud"})
-        stashArray = stashArrayCursor[0]['Stash']
-        confirmedFrauds = []
-        for number in cleanedNumbers:
-            if(stashArray.count(number) > 1):
-                confirmedFrauds.append(number)
+    stashArrayCursor = colCovid.find({"Title": "Fraud"})
+    stashArray = stashArrayCursor[0]['Stash']
+    confirmedFrauds = []
+    for number in cleanedNumbers:
+        if(stashArray.count(number) > 1):
+            confirmedFrauds.append(number)
 
         # Create Update Query!
-        createRecordCovid = {
-            'Numbers': confirmedFrauds
-        }
-        updateQueryCovid = {"$addToSet": {
-            "Numbers": {"$each": createRecordCovid['Numbers']}}}
+    createRecordCovid = {
+        'Numbers': confirmedFrauds
+    }
+    updateQueryCovid = {"$addToSet": {
+        "Numbers": {"$each": createRecordCovid['Numbers']}}}
 
-        # Write to Covid.Army
+    # Write to Covid.Army
 
-        createRecCovidArmy = [{
-            "phone_no": i,
-            "Date": str(datetime.now())
-        } for i in confirmedFrauds]
+    createRecCovidArmy = [{
+        "phone_no": i,
+        "Date": str(datetime.now())
+    } for i in confirmedFrauds]
 
-        for i in createRecCovidArmy:
-            colCovid.update(i, i, upsert=True)
+    for i in createRecCovidArmy:
+        colCovid.update(i, i, upsert=True)
+        colCovid2.update(i, i, upsert=True)
 
         # Write to Fraud Detector
-        client, col = createMongoConnection()
-        col.update_one({"Resource": "Unspecified"}, updateQueryCovid)
-        client.close()
-
-        clientCovid.close()
-
-    thread = threading.Thread(target=writeToFraud)
-    thread.start()
-
+    client, col = createMongoConnection()
+    col.update_one({"Resource": "Unspecified"}, updateQueryCovid)
+    client.close()
+    clientCovid.close()
     return jsonify(
         Status=200
     )
 
 
-# @app.route('/reportIT', methods=['POST'])
-# def reportIt():
-#     tweetData = request.get_json()
-#     print(tweetData.keys())
+@app.route("/getAllFrauds", methods=['GET'])
+def getAllFrauds():
+    client, col = createMongoConnection()
+    res = col.find()
+    jsonArray = res[1:]
 
-#     def reportThisTweet():
-#         allFraudNumbers = []
-#         fraudNumberFromImage = []
-#         fraudNumberFromText = findNumbersInText(tweetData['full_text'])
-#         if(len(fraudNumberFromText) == 0):
-#             if("extended_entities" in tweetData.keys()):
-#                 fraudNumberFromImage = findNumbersInImage(
-#                     tweetData['extended_entities']['media'])
-#         allFraudNumbers = fraudNumberFromText+fraudNumberFromImage
-#         createRecord = {
-#             'Numbers': allFraudNumbers
-#         }
-
-#         # Add to FraudDB
-#         client, col = createMongoConnection()
-#         updateQuery = {"$addToSet": {
-#             "Numbers": {"$each": createRecord['Numbers']}}}
-#         col.update_one({"Resource": "Unspacified"}, updateQuery)
-#         client.close()
-
-#         # Add to Covid.Army DB
-#         clientCovid, colCovid = createMongoConnectionCovidArmy()
-#         updateQueryCovid = {"$addToSet": {
-#             "Numbers": {"$each": createRecord['Numbers']}}}
-#         colCovid.update_one({"Title": "Fraud"}, updateQueryCovid)
-#         clientCovid.close()
-
-#     thread = threading.Thread(target=reportThisTweet)
-#     thread.start()
-#     return jsonify(
-#         Status=200,
-#         Value="Reported Successfully!"
-#     )
+    createResp = [{"Resource": i['Resource'],
+                   "Numbers": i['Numbers']} for i in jsonArray]
+    client.close()
+    return jsonify(
+        Status=200,
+        Frauds=createResp
+    )
